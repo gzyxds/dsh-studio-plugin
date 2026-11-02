@@ -4,6 +4,9 @@ node_modules/
 # 测试产物
 .tmp-e2e/
 
+# 一次性审计/探针：脚本、dry-run bundle、.out 输出都是过程产物，不进仓库
+.tmp-audit/
+
 # 编辑器 / 系统
 .DS_Store
 Thumbs.db

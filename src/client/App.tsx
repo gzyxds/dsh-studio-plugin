@@ -4,7 +4,7 @@
  * 两栏布局：左栏是「输入 → 结构化 → 合规」的单向链路，右栏是「文案 / 卡片图」
  * 两个产出页签。这样用户改一处设置，只需要看右栏的结果区，视线不用来回横跳。
  */
-import { useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 
 import type { PanelProps } from './contract'
 import { CompliancePanel, SourcePanel, SpecPanel } from './panels/Source'
@@ -42,11 +42,25 @@ export function StudioPanel({ t: injectedT }: { t?: (key: string) => string }) {
   const t = fallbackT(injectedT)
   const [toast, setToast] = useState<string | null>(null)
   const [tab, setTab] = useState<'copy' | 'poster'>('copy')
+  /** 轻提示计时器：后一条提示要清掉前一条的计时，卸载时也要清，避免指向已卸载组件。 */
+  const toastTimer = useRef<number | null>(null)
 
-  const { state, actions } = useStudio((message) => {
+  const showToast = useCallback((message: string) => {
     setToast(message)
-    window.setTimeout(() => setToast(null), TOAST_MS)
-  })
+    if (toastTimer.current !== null) window.clearTimeout(toastTimer.current)
+    toastTimer.current = window.setTimeout(() => {
+      toastTimer.current = null
+      setToast(null)
+    }, TOAST_MS)
+  }, [])
+
+  useEffect(() => {
+    return () => {
+      if (toastTimer.current !== null) window.clearTimeout(toastTimer.current)
+    }
+  }, [])
+
+  const { state, actions } = useStudio(showToast)
 
   const panelProps: PanelProps = { state, actions, t }
 

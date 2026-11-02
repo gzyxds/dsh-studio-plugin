@@ -96,6 +96,24 @@ function parseLabelLine(line: string): { label: string; inline: string } | null 
 }
 
 /**
+ * 判断首行是「字段行」还是「商品标题」。
+ *
+ * 标题里通常没有冒号（`【实体卡】重庆联通49元200G`）；带 `字段：值` 冒号、
+ * 或字段名后跟空格的（`发货地区 全国`），几乎都是字段行，不能当标题吞掉。
+ *
+ * @param line - 首个非空行（已 trim）。
+ * @returns 是否像字段行。
+ */
+function isFieldLine(line: string): boolean {
+  if (parseLabelLine(line)) return true;
+  const colon = line.match(/^([^：:]{2,12})[：:]/);
+  if (!colon) return false;
+  return /月租|月费|首充|充值|流量|通话|短信|资费|年龄|合约|发货|归属地|激活|快递|优惠|有效期|办理|选号|温馨提示/.test(
+    colon[1]
+  );
+}
+
+/**
  * 把整段文案切成「标题 + 若干字段块 + 剩余行」。
  *
  * 值块的边界是「下一个字段行」，因此 `产品套餐` 下面连续几段自由描述会整体归入
@@ -106,8 +124,15 @@ function parseLabelLine(line: string): { label: string; inline: string } | null 
  */
 function splitSections(text: string): SplitResult {
   const lines = text.split(/\r?\n/).map((line) => line.trim());
-  const titleIndex = lines.findIndex((line) => line !== '');
-  const titleLine = titleIndex >= 0 ? lines[titleIndex] : '';
+  const firstIndex = lines.findIndex((line) => line !== '');
+  const firstLine = firstIndex >= 0 ? lines[firstIndex] : '';
+
+  // 首行不一定都是标题：`发货地区：全国`、`月租：19元` 这类字段行若被当标题吞掉，
+  // 字段会整块消失（甚至把「不发货地区」当成标题，导致发货范围解析成空）。
+  const titleLike =
+    firstLine !== '' && !TIMESTAMP_LINE_PATTERN.test(firstLine) && !isFieldLine(firstLine);
+  const titleIndex = titleLike ? firstIndex : -1;
+  const titleLine = titleLike ? firstLine : '';
 
   const consumed = new Set<number>();
   if (titleIndex >= 0) consumed.add(titleIndex);
@@ -169,11 +194,13 @@ function findSection(sections: Section[], labels: readonly string[]): string {
 /** 月租候选：按可信度从高到低，先命中先返回，全部是「月租」语境而非任意「N元」 */
 const MONTHLY_FEE_PATTERNS: readonly RegExp[] = [
   /(\d+(?:\.\d+)?)\s*元\s*月租/,
-  /月租\s*(?:是|为|仅|只要|只需)?\s*(\d+(?:\.\d+)?)\s*元/,
-  /每月\s*(\d+(?:\.\d+)?)\s*元/,
-  /月费\s*(?:是|为|仅|只要|只需)?\s*(\d+(?:\.\d+)?)\s*元/,
+  /月租\s*[：:]?\s*(?:是|为|仅|只要|只需)?\s*(\d+(?:\.\d+)?)\s*元/,
+  /每月\s*[：:]?\s*(\d+(?:\.\d+)?)\s*元/,
+  /月费\s*[：:]?\s*(?:是|为|仅|只要|只需)?\s*(\d+(?:\.\d+)?)\s*元/,
   /(\d+(?:\.\d+)?)\s*元\s*\/\s*月/,
   /(\d+(?:\.\d+)?)\s*元\s*包月/,
+  // 有些文案写「56/月500M」，金额后不跟「元」
+  /(\d+(?:\.\d+)?)\s*\/\s*月/,
 ];
 
 /**
@@ -197,11 +224,17 @@ function isPlausibleFee(value: number): boolean {
  * @returns 月租；不满足组合条件返回 0。
  */
 function feeFromTitle(titleLine: string): number {
-  const feeHit = titleLine.match(/(\d+(?:\.\d+)?)\s*元/);
   const flowHit = titleLine.match(/(\d+(?:\.\d+)?)\s*(?:GB|G)(?![A-Za-z])/i);
-  if (!feeHit || !flowHit) return 0;
-  const value = Number(feeHit[1]);
-  return isPlausibleFee(value) ? value : 0;
+  if (!flowHit) return 0;
+  // 「原价39元/月，现价19元/月，含100G」这种标题里，第一个 N元 是划掉的旧价
+  for (const match of titleLine.matchAll(/(\d+(?:\.\d+)?)\s*元/g)) {
+    const index = match.index ?? 0;
+    const before = titleLine.slice(Math.max(0, index - 4), index);
+    if (/原价|首月|首充|充值|预存|赠送|折合|每天|日均|平均/.test(before)) continue;
+    const value = Number(match[1]);
+    if (isPlausibleFee(value)) return value;
+  }
+  return 0;
 }
 
 /**
@@ -217,9 +250,17 @@ function feeFromTitle(titleLine: string): number {
  */
 function pickMonthlyFee(text: string, sections: Section[], titleLine: string): number {
   for (const pattern of MONTHLY_FEE_PATTERNS) {
-    const hit = text.match(pattern);
-    const value = hit ? Number(hit[1]) : 0;
-    if (isPlausibleFee(value)) return value;
+    // 同一句式可能先出现「原价 39 元/月」再出现「现价 19 元/月」，
+    // 不能取首个命中；带原价 / 首月 / 赠费 / 加装语境的金额一律跳过。
+    for (const match of text.matchAll(new RegExp(pattern.source, 'g'))) {
+      const index = match.index ?? 0;
+      const value = Number(match[1]);
+      if (!isPlausibleFee(value)) continue;
+      // 只看紧邻的 4 个字符：窗口太长会把上一句的「原价」带进来，导致现价被误跳过
+      const before = text.slice(Math.max(0, index - 4), index);
+      if (/原价|首月|首充|充值|预存|赠送|折合|每天|日均|平均|\+\s*$/.test(before)) continue;
+      return value;
+    }
   }
 
   const fromTitle = feeFromTitle(titleLine);
@@ -227,9 +268,15 @@ function pickMonthlyFee(text: string, sections: Section[], titleLine: string): n
 
   const plan = findSection(sections, ['产品套餐', '套餐内容', '套餐详情', '套餐资费']);
   if (plan) {
-    const hit = plan.match(/(\d+(?:\.\d+)?)\s*元/);
-    const value = hit ? Number(hit[1]) : 0;
-    if (isPlausibleFee(value)) return value;
+    // 套餐段里第一个「N元」可能是首充 / 预存 / 赠送金额，必须按所在分句排除，
+    // 否则「产品套餐：200G通用流量/通话300分钟/首充200元」会把月租解析成 200。
+    for (const match of plan.matchAll(/(\d+(?:\.\d+)?)\s*元/g)) {
+      const index = match.index ?? 0;
+      const clause = plan.slice(Math.max(0, index - 12), index + match[0].length + 6);
+      if (/首充|充值|预存|赠送|话费|返/.test(clause)) continue;
+      const value = Number(match[1]);
+      if (isPlausibleFee(value)) return value;
+    }
   }
   return 0;
 }
@@ -259,18 +306,28 @@ function pickFlow(text: string): FlowPick {
 
   for (const match of text.matchAll(FLOW_TOKEN_PATTERN)) {
     const index = match.index ?? 0;
-    const before = text.slice(Math.max(0, index - 12), index);
+    // 只在本行内看上下文：跨行的 `\s*` 会把下一行的「定向流量」当成当前额度的定语，
+    // 出现「19元100G\n定向流量30G」被解析成通用 30G、定向 100G 的反转。
+    const lineStart = text.lastIndexOf('\n', index - 1) + 1;
+    const nextBreak = text.indexOf('\n', index);
+    const lineEnd = nextBreak === -1 ? text.length : nextBreak;
+    const before = text.slice(Math.max(lineStart, index - 12), index);
     if (/元\s*\/\s*$/.test(before)) continue;
 
-    const after = text.slice(index + match[0].length, index + match[0].length + 10);
+    const after = text.slice(index + match[0].length, Math.min(lineEnd, index + match[0].length + 10));
     if (/^\s*(?:流量卡|网络|全网通|手机|套餐|信号)/.test(after)) continue;
 
     const value = Number(match[1]);
     if (!Number.isFinite(value) || value <= 0) continue;
 
-    if (/^\s*(?:定向|专属)/.test(after)) {
+    // 「定向流量30G」的定语在数字前面，「30G定向」的在后面，两种都要认
+    if (/^\s*(?:定向|专属)/.test(after) || /(?:定向|专属)(?:流量)?\s*$/.test(before)) {
       directional = Math.max(directional, value);
-    } else if (/^\s*(?:全国)?通用|^\s*全国/.test(after)) {
+    } else if (
+      /^\s*(?:全国)?通用|^\s*全国/.test(after) ||
+      /(?:全国)?通用(?:流量)?\s*$/.test(before) ||
+      /全国\s*$/.test(before)
+    ) {
       general = Math.max(general, value);
     } else {
       neutral = Math.max(neutral, value);
@@ -301,11 +358,11 @@ function pickVoiceMinutes(text: string): number {
 
 /** 首充候选：优先「首充」，其次「充值」；金额区间单独校验 */
 const FIRST_CHARGE_PATTERNS: readonly RegExp[] = [
-  /首充\s*(\d+(?:\.\d+)?)\s*元/,
+  /首充\s*[：:]?\s*(\d+(?:\.\d+)?)\s*元/,
   /(\d+(?:\.\d+)?)\s*元\s*首充/,
-  /首充\s*(\d+(?:\.\d+)?)/,
-  /(?:激活|务必|需|须)?充值\s*(\d+(?:\.\d+)?)\s*元/,
-  /充值\s*(\d+(?:\.\d+)?)/,
+  /首充\s*[：:]?\s*(\d+(?:\.\d+)?)/,
+  /(?:激活|务必|需|须)?充值\s*[：:]?\s*(\d+(?:\.\d+)?)\s*元/,
+  /充值\s*[：:]?\s*(\d+(?:\.\d+)?)/,
 ];
 
 /**
@@ -415,10 +472,20 @@ function pickAgeRange(text: string, sections: Section[]): string {
  * @returns 发货范围原文（如「仅发重庆」）；未标注返回空串。
  */
 function pickShipRegion(text: string, sections: Section[]): string {
-  const section = findSection(sections, ['不发货地区', '发货地区', '可发地区']);
-  if (section) return section.split('\n')[0].trim();
-  const free = text.match(/(?:仅发|只发|限发|仅限)([^\n，。；;、]{1,12})/);
-  return free ? `${free[0].trim()}`.split('\n')[0] : '';
+  const hit = sections.find((section) =>
+    ['不发货地区', '发货地区', '可发地区'].includes(section.label)
+  );
+  if (hit) {
+    const line = hit.value.split('\n')[0].trim();
+    if (line) {
+      const positive = /^(?:仅发|只发|限发|仅限|只限)/.test(line) || hit.label !== '不发货地区';
+      // 「不发货地区：新疆、西藏」不能当成发货范围（语义正好相反），
+      // 转成「除新疆、西藏外」才是可发货地区。
+      return positive ? line : `除${line}外`;
+    }
+  }
+  const free = text.match(/(?:仅发|只发|限发|仅限)[^\n，。；;、]{1,12}/);
+  return free ? free[0].trim() : '';
 }
 
 /** 附加权益词表：只认这些确定是「赠送/附带」的东西 */

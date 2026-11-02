@@ -571,7 +571,7 @@ function buildXiaohongshuBody(facts: FactView, tone: CopyTone, index: number): s
       '关键信息就上面几条，不用再看别的长文。',
     ],
     story: [
-      '换完之后最大的变化是，月底不用盯着流量剩多少了。',
+      '换完之后最明显的变化是，月底不用盯着流量剩多少了。',
       '账单从一百多降到这个数，我妈终于不念叨了。',
       '过程比想象中简单，激活那一步花的时间最多。',
     ],
@@ -810,8 +810,10 @@ function buildBilibiliBody(facts: FactView, tone: CopyTone, index: number): stri
 
   const analysis: string[] = [];
   if (facts.fee > 0 && facts.flow > 0) {
+    // perGJiao 在极端单价（如 300 元 10G）下返回空串，直接拼会留下「大概  毛」残句
+    const perG = perGJiao(facts);
     analysis.push(
-      `按 ${facts.fee} 元 / ${facts.flow}G 折算，每 G 大概 ${perGJiao(facts)} 毛，` +
+      (perG ? `按 ${facts.fee} 元 / ${facts.flow}G 折算，每 G 大概 ${perG} 毛，` : `按 ${facts.fee} 元 / ${facts.flow}G 折算，单价不算低，`) +
         '这个价位主要看通用流量给得够不够，定向流量再多也要单独算。'
     );
   }
@@ -952,10 +954,8 @@ function buildNotes(
     notes.push(`合约期 ${facts.contractMonths} 个月，评论区问到要如实说`);
   }
 
-  notes.push(PLATFORM_NOTES[platform]);
-  notes.push(TONE_NOTES[tone]);
-
-  return notes.slice(0, 4);
+  // 平台/体裁提醒必须留下：先取最重要的两条素材提醒，再补平台与体裁各一条
+  return [...notes.slice(0, 2), PLATFORM_NOTES[platform], TONE_NOTES[tone]];
 }
 
 // ===================== 七、主入口 =====================

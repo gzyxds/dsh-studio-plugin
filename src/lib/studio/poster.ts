@@ -333,13 +333,21 @@ function wrapLines(ctx: CanvasRenderingContext2D, text: string, maxWidth: number
 
     for (const token of tokens) {
       if (/^\s+$/.test(token) && current === '') continue;
-      const candidate = current + token;
-      if (current === '' || ctx.measureText(candidate.trimEnd()).width <= maxWidth) {
-        current = candidate;
-        continue;
+
+      if (current !== '' && ctx.measureText((current + token).trimEnd()).width > maxWidth) {
+        lines.push(current.trimEnd());
+        current = token.trimStart();
+      } else {
+        current += token;
       }
-      lines.push(current.trimEnd());
-      current = token.trimStart();
+
+      // 当前行本身超宽（长 URL / 连续字母数字，换行后仍然超宽）时按字符硬折，
+      // 否则它会原样画出去、横向溢出画布（审计里的 chips / 页脚溢出即此）。
+      if (ctx.measureText(current.trimEnd()).width > maxWidth) {
+        const broken = breakToken(ctx, current, maxWidth);
+        lines.push(...broken.slice(0, -1));
+        current = broken[broken.length - 1] ?? '';
+      }
     }
 
     lines.push(current.trimEnd());
@@ -348,6 +356,30 @@ function wrapLines(ctx: CanvasRenderingContext2D, text: string, maxWidth: number
   // 去掉空段落产生的空行，但保底返回一行，避免调用方拿到空数组
   const cleaned = lines.filter((line) => line !== '');
   return cleaned.length > 0 ? cleaned : [''];
+}
+
+/**
+ * 单个超宽 token 按字符硬折。
+ *
+ * @param ctx - Canvas 上下文（调用前需已设置好 `ctx.font`）。
+ * @param token - 待拆分的 token。
+ * @param maxWidth - 单行最大宽度（逻辑 px）。
+ * @returns 至少一段文本。
+ */
+function breakToken(ctx: CanvasRenderingContext2D, token: string, maxWidth: number): string[] {
+  const parts: string[] = [];
+  let current = '';
+  for (const char of Array.from(token)) {
+    const candidate = current + char;
+    if (current !== '' && ctx.measureText(candidate).width > maxWidth) {
+      parts.push(current);
+      current = char;
+    } else {
+      current = candidate;
+    }
+  }
+  if (current !== '') parts.push(current);
+  return parts.length > 0 ? parts : [''];
 }
 
 /**
@@ -426,8 +458,13 @@ function fitText(ctx: CanvasRenderingContext2D, text: string, options: FitOption
   // 缩到下限仍放不下：保留前 maxLines 行，末行省略（极端长文案的兜底）
   ctx.font = fontOf(minSize, weight);
   const lines = wrapLines(ctx, trimmed, maxWidth);
+  const truncated = lines.length > maxLines;
   const kept = lines.slice(0, maxLines);
-  kept[kept.length - 1] = ellipsize(ctx, kept[kept.length - 1], maxWidth);
+  // 只有「内容确实被截掉」时才补省略号：否则读者看不出后面还有文字
+  if (kept.length > 0) {
+    const last = truncated ? `${kept[kept.length - 1]}…` : kept[kept.length - 1];
+    kept[kept.length - 1] = ellipsize(ctx, last, maxWidth);
+  }
   return {
     lines: kept,
     size: minSize,
@@ -594,7 +631,9 @@ async function loadQrImage(url: string): Promise<HTMLImageElement | null> {
   try {
     let dataUrl = qrCache.get(text);
     if (!dataUrl) {
-      dataUrl = await QRCode.toDataURL(text, { margin: 1, width: QR_PIXEL_SIZE });
+      // margin 单位是「模块数」：4 是 ISO/IEC 18004 要求的最小静区，
+      // 设 1 再靠托板留白时实测只有 1.8–2.4 个模块，部分手机扫码会失败
+      dataUrl = await QRCode.toDataURL(text, { margin: 4, width: QR_PIXEL_SIZE });
       if (qrCache.size >= QR_CACHE_LIMIT) {
         const oldest = qrCache.keys().next();
         if (!oldest.done) qrCache.delete(oldest.value);
@@ -926,7 +965,8 @@ function drawPriceBlock(
   ctx.fillText(`${pc.spec.monthlyFee}`, x + layout.markWidth + layout.markSize * 0.08, baseline);
 
   ctx.font = fontOf(layout.unitSize, 500);
-  ctx.fillStyle = withAlpha(theme.fg, 0.72);
+  // 直接用不透明 fg：0.72 透明度在 brand 主题下只有 3.5–4.1:1，低于 AA 4.5:1
+  ctx.fillStyle = theme.fg;
   ctx.fillText('/月', x + layout.markWidth + layout.feeWidth + layout.markSize * 0.24, baseline);
 
   // 首充说明：accent 实底小胶囊（accentFg 深字，5.3–12.2:1，全部达标）
@@ -1051,17 +1091,19 @@ function drawChips(
   const gap = 9 * unit * factor;
   const rowHeight = baseFontSize + padY * 2;
 
-  // 先测量再排：单颗胶囊超过整行宽度时先缩字号，而不是让它顶出画面
+  // 先测量再排：单颗胶囊超过整行宽度时先缩字号，缩到底仍放不下就省略号截断
+  const maxTextWidth = Math.max(0, width - padX * 2);
   const items = chips.map((chip) => {
     let size = baseFontSize;
     ctx.font = fontOf(size, 600);
     let textWidth = ctx.measureText(chip).width;
-    while (textWidth + padX * 2 > width && size > baseFontSize * 0.62) {
+    while (textWidth > maxTextWidth && size > baseFontSize * 0.62) {
       size -= 1;
       ctx.font = fontOf(size, 600);
       textWidth = ctx.measureText(chip).width;
     }
-    return { chip, size, textWidth: Math.min(textWidth, width - padX * 2) };
+    const text = ellipsize(ctx, chip, maxTextWidth);
+    return { chip: text, size, textWidth: Math.min(ctx.measureText(text).width, maxTextWidth) };
   });
 
   let cursorX = x;

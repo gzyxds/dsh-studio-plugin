@@ -11,9 +11,8 @@ import { parseProductText } from '../lib/studio/parse'
 import { checkCompliance } from '../lib/studio/compliance'
 import { generateVariants } from '../lib/studio/copy'
 import { renderPoster, downloadPoster } from '../lib/studio/poster'
-import type { PosterResult } from '../lib/studio/types'
+import type { CopyVariant, PosterResult, ProductSpec } from '../lib/studio/types'
 import { getPlatform } from '../lib/studio/platforms'
-import type { ProductSpec } from '../lib/studio/types'
 
 import type { StudioActions, StudioState } from './contract'
 import { SAMPLE_TEXT } from './sample'
@@ -60,6 +59,26 @@ export function defaultSubline(spec: ProductSpec): string {
 
 /** 默认页脚。 */
 const DEFAULT_FOOTER = `${DEFAULT_BRAND} · 官方自助下单`
+
+/**
+ * 生成后复扫。
+ *
+ * 生成器只保证「数字来自 spec」，但卖点、优惠期、发货地区这些自由文本可能
+ * 带进风险词（例如把优惠期写成「永久」）。这里逐条复扫，把命中写进 notes，
+ * 让「生成结果自己踩自己的合规规则」在界面上可见，而不是悄悄发出去。
+ *
+ * @param variants - 刚生成的文案变体。
+ * @returns 追加了风险提示的变体（无命中时原样返回）。
+ */
+function annotateCompliance(variants: CopyVariant[]): CopyVariant[] {
+  return variants.map((variant) => {
+    const report = checkCompliance(variant.full)
+    if (report.level === 'pass') return variant
+    const hits = Array.from(new Set(report.issues.map((issue) => issue.matched))).slice(0, 2)
+    const hint = `发布前注意：检出「${hits.join('」「')}」等风险表述，建议改写后再发`
+    return { ...variant, notes: [hint, ...variant.notes].slice(0, 4) }
+  })
+}
 
 const INITIAL: StudioState = {
   raw: '',
@@ -130,6 +149,9 @@ export function useStudio(onToast: (message: string) => void): {
   const [state, setState] = useState<StudioState>(INITIAL)
   /** 出图结果单独存在 ref：canvas 不需要参与 diff，也不该被序列化。 */
   const posterRef = useRef<PosterResult | null>(null)
+  /** 最新状态的镜像：动作里读它，避免把副作用塞进 setState 的 updater（StrictMode 会双调用）。 */
+  const stateRef = useRef(state)
+  stateRef.current = state
 
   const patch = useCallback((next: Partial<StudioState>) => {
     setState((prev) => ({ ...prev, ...next }))
@@ -138,31 +160,30 @@ export function useStudio(onToast: (message: string) => void): {
   const setRaw = useCallback((value: string) => patch({ raw: value }), [patch])
 
   const parse = useCallback(() => {
-    setState((prev) => {
-      const text = prev.raw.trim()
-      if (text === '') {
-        onToast('请先粘贴商品原文')
-        return prev
-      }
+    const current = stateRef.current
+    const text = current.raw.trim()
+    if (text === '') {
+      onToast('请先粘贴商品原文')
+      return
+    }
 
-      const parsed = parseProductText(text)
-      const compliance = checkCompliance(text)
-      const spec = parsed.spec
+    const parsed = parseProductText(text)
+    const compliance = checkCompliance(text)
+    const spec = parsed.spec
 
-      return {
-        ...prev,
-        parsed,
-        spec,
-        compliance,
-        headline: spec.name || spec.rawTitle,
-        subline: defaultSubline(spec),
-        chipsText: defaultChips(spec).join('，'),
-        variants: [],
-        posterUrl: null,
-        posterMeta: null,
-      }
-    })
     posterRef.current = null
+    setState((prev) => ({
+      ...prev,
+      parsed,
+      spec,
+      compliance,
+      headline: spec.name || spec.rawTitle,
+      subline: defaultSubline(spec),
+      chipsText: defaultChips(spec).join('，'),
+      variants: [],
+      posterUrl: null,
+      posterMeta: null,
+    }))
   }, [onToast])
 
   const fillSample = useCallback(() => {
@@ -191,24 +212,32 @@ export function useStudio(onToast: (message: string) => void): {
   const setBrand = useCallback((value: string) => patch({ brand: value }), [patch])
 
   const generate = useCallback(() => {
-    setState((prev) => {
-      if (prev.spec === null) {
-        onToast('请先解析商品原文')
-        return prev
-      }
+    const current = stateRef.current
+    if (current.spec === null) {
+      onToast('请先解析商品原文')
+      return
+    }
 
-      const variants = generateVariants(prev.spec, prev.platform, prev.tone, {
-        link: prev.link,
-        count: prev.count,
-        brand: prev.brand,
+    const variants = annotateCompliance(
+      generateVariants(current.spec, current.platform, current.tone, {
+        link: current.link,
+        count: current.count,
+        brand: current.brand,
       })
+    )
 
-      return { ...prev, variants }
-    })
+    setState((prev) => ({ ...prev, variants }))
   }, [onToast])
 
-  const setSize = useCallback((value: StudioState['size']) => patch({ size: value }), [patch])
-  const setTheme = useCallback((value: StudioState['theme']) => patch({ theme: value }), [patch])
+  // 换尺寸 / 主题 / 倍率后旧图已不代表当前设置，清掉预览避免「图与参数对不上」
+  const setSize = useCallback(
+    (value: StudioState['size']) => patch({ size: value, posterUrl: null, posterMeta: null }),
+    [patch]
+  )
+  const setTheme = useCallback(
+    (value: StudioState['theme']) => patch({ theme: value, posterUrl: null, posterMeta: null }),
+    [patch]
+  )
   const setHeadline = useCallback((value: string) => patch({ headline: value }), [patch])
   const setSubline = useCallback((value: string) => patch({ subline: value }), [patch])
   const setChipsText = useCallback((value: string) => patch({ chipsText: value }), [patch])
@@ -217,41 +246,42 @@ export function useStudio(onToast: (message: string) => void): {
   const setScale = useCallback((value: number) => patch({ scale: value }), [patch])
 
   const render = useCallback(() => {
-    setState((prev) => {
-      if (prev.spec === null) {
-        onToast('请先解析商品原文')
-        return prev
+    const current = stateRef.current
+    if (current.spec === null) {
+      onToast('请先解析商品原文')
+      return
+    }
+
+    const request = {
+      spec: current.spec as ProductSpec,
+      size: current.size,
+      theme: current.theme,
+      headline: current.headline,
+      subline: current.subline,
+      chips: splitChips(current.chipsText),
+      footer: current.footer,
+      qrUrl: current.qrUrl,
+      scale: current.scale,
+    }
+
+    setState((prev) => ({ ...prev, rendering: true }))
+
+    void (async () => {
+      try {
+        const result = await renderPoster(request)
+
+        posterRef.current = result
+        setState((prev) => ({
+          ...prev,
+          posterUrl: result.canvas.toDataURL('image/png'),
+          posterMeta: { filename: result.filename, width: result.width, height: result.height },
+          rendering: false,
+        }))
+      } catch (error) {
+        onToast(error instanceof Error ? error.message : '出图失败')
+        setState((prev) => ({ ...prev, rendering: false }))
       }
-
-      void (async () => {
-        try {
-          const result = await renderPoster({
-            spec: prev.spec as ProductSpec,
-            size: prev.size,
-            theme: prev.theme,
-            headline: prev.headline,
-            subline: prev.subline,
-            chips: splitChips(prev.chipsText),
-            footer: prev.footer,
-            qrUrl: prev.qrUrl,
-            scale: prev.scale,
-          })
-
-          posterRef.current = result
-          setState((current) => ({
-            ...current,
-            posterUrl: result.canvas.toDataURL('image/png'),
-            posterMeta: { filename: result.filename, width: result.width, height: result.height },
-            rendering: false,
-          }))
-        } catch (error) {
-          onToast(error instanceof Error ? error.message : '出图失败')
-          setState((current) => ({ ...current, rendering: false }))
-        }
-      })()
-
-      return { ...prev, rendering: true }
-    })
+    })()
   }, [onToast])
 
   const download = useCallback(() => {

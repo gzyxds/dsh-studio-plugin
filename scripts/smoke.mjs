@@ -36,7 +36,8 @@ function check(ok, message) {
 console.log('\n[1] 引擎链路')
 
 const { parseProductText } = await import('../src/lib/studio/parse.ts')
-const { checkCompliance } = await import('../src/lib/studio/compliance.ts')
+const { checkCompliance, COMPLIANCE_RULES } = await import('../src/lib/studio/compliance.ts')
+const { SAMPLE_TEXT } = await import('../src/client/sample.ts')
 const { generateVariants } = await import('../src/lib/studio/copy.ts')
 const { buildTags } = await import('../src/lib/studio/tags.ts')
 
@@ -64,6 +65,17 @@ check(spec.shipRegion.includes('重庆'), `发货地区含重庆（实际 ${spec
 const report = checkCompliance('月租永久19元，不限量流量，官方授权渠道，仅剩最后一天')
 check(report.level === 'block', `违规原文判为 block（实际 ${report.level}）`)
 check(report.issues.length >= 3, `命中至少 3 条规则（实际 ${report.issues.length}）`)
+check(COMPLIANCE_RULES.length === 20, `合规规则 20 条（实际 ${COMPLIANCE_RULES.length}）`)
+check(checkCompliance(SAMPLE_TEXT).level === 'pass', '内置示例不被自身规则误报')
+check(
+  checkCompliance('平台所有产品不允许任何形式的二次包装、包装9元、宣传永久，违者永不合作').level === 'pass',
+  '上游约束句被豁免，不当成自己违规'
+)
+check(
+  parseProductText('不发货地区：新疆、西藏').spec.shipRegion === '除新疆、西藏外',
+  `不发货地区不反转（实际 ${parseProductText('不发货地区：新疆、西藏').spec.shipRegion}）`
+)
+check(parseProductText('月租：19元').spec.monthlyFee === 19, '冒号写法能识别月租')
 
 const variants = generateVariants(spec, 'xiaohongshu', 'seed', { count: 3, brand: '号卡之家' })
 check(variants.length === 3, `生成 3 条小红书文案（实际 ${variants.length}）`)
