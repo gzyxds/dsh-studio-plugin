@@ -1,0 +1,16 @@
+# 依赖：插件运行期不需要，只有重新构建时才需要
+node_modules/
+
+# 测试产物
+.tmp-e2e/
+
+# 编辑器 / 系统
+.DS_Store
+Thumbs.db
+*.log
+.vscode/
+.idea/
+
+# 注意：lib/ 故意不忽略。
+# 它是构建产物，但插件从本地目录或 Git 安装时不会再跑构建，
+# 所以 lib/index.js 与 lib/client.js 必须进仓库，客户下载后即可安装。

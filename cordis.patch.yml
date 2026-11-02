@@ -1,0 +1,12 @@
+# dsh-studio bundle patch
+#
+# `plugin_manager install_bundle` reads this file through `dsh.bundle.patch` and
+# merges the single `insert` row below into the profile's plugin tree, so the
+# workbench mounts without editing any profile file by hand.
+#
+# The row's `id` is also the address used by the profile's own cordis.patch.yml
+# if a user ever wants to disable the workbench: `- id: studio / disabled: true`.
+- insert:
+    - id: studio
+      name: 'dsh-studio'
+      config: {}
